@@ -27,20 +27,26 @@ import { Type } from "@sinclair/typebox";
 // Error message patterns that indicate retriable provider failures
 // ---------------------------------------------------------------------------
 const RETRIABLE_PATTERNS = [
+  // Rate limits & usage caps
   /rate.?limit/i,
-  /429/,
-  /too many requests/i,
-  /overloaded/i,
-  /529/,
-  /billing/i,
-  /402/,
-  /capacity/i,
-  /quota/i,
+  /hit.+limit/i,
   /usage.?limit/i,
-  /server.?error/i,
+  /too many requests/i,
+  /quota/i,
+  /capacity/i,
+  /resets?\s+\d/i,          // "resets 3pm", "resets at 1:22"
+  // HTTP status codes
+  /429/,
+  /402/,
   /500/,
-  /timeout/i,
   /504/,
+  /529/,
+  // Server issues
+  /overloaded/i,
+  /billing/i,
+  /server.?error/i,
+  /timeout/i,
+  // Connection failures
   /connection.?error/i,
   /ECONNREFUSED/i,
 ];
