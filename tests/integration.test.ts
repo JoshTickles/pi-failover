@@ -140,7 +140,7 @@ describe("Automatic model swap (mechanism 2)", () => {
     // Should see: initial attempt fails, then auto-swap
     expect(result.stderr).toContain("Loaded: 1 backend(s), 1 fallback model(s)");
     expect(result.stderr).toContain("Retriable error");
-    expect(result.stderr).toContain("swapping to mock-backup/mock-model");
+    expect(result.stderr).toContain("Swapping to mock-backup/mock-model");
     expect(result.stderr).toContain("Retrying prompt");
   }, 30_000);
 });

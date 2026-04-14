@@ -49,6 +49,9 @@ const RETRIABLE_PATTERNS = [
   // Connection failures
   /connection.?error/i,
   /ECONNREFUSED/i,
+  // Our own failover provider exhaustion
+  /all backends/i,
+  /all providers/i,
 ];
 
 function isRetriableError(errorMessage: string): boolean {
@@ -173,66 +176,109 @@ export default function (pi: ExtensionAPI) {
       return { action: "continue" as const };
     });
 
-    // Watch for errors on assistant messages
-    pi.on("message_end", async (event, ctx) => {
+    // -----------------------------------------------------------------------
+    // Detection strategy:
+    //
+    // Pi has auto-retry for SOME errors (rate_limit, connection, 429, 500,
+    // etc.) with exponential backoff (default 3 retries).
+    //
+    // But some errors Pi WON'T retry:
+    //   - "You've hit your limit · resets 3pm" (Claude Max subscription cap)
+    //   - "All backends are in cooldown" (our own failover provider)
+    //   - Billing errors without standard HTTP codes
+    //
+    // Strategy:
+    //   1. On message_end with error: record it, classify it
+    //   2. On agent_end: check if this is an error Pi won't retry
+    //      (= our retriable, but NOT Pi's retriable) → swap immediately
+    //   3. For errors Pi IS retrying: count consecutive errors,
+    //      swap after Pi exhausts retries (consecutiveErrors > PI_MAX_RETRIES)
+    // -----------------------------------------------------------------------
+
+    // Pi's own retryable error regex (from agent-session.js _isRetryableError)
+    const PI_RETRYABLE = /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|ended without|timed?.out|timeout|terminated|retry delay/i;
+
+    let consecutiveErrors = 0;
+    let lastErrorMessage = "";
+    let lastErrorIsPiRetryable = false;
+    const PI_MAX_RETRIES = 3;
+
+    pi.on("message_end", async (event, _ctx) => {
       const msg = event.message;
       if (msg.role !== "assistant") return;
 
       const assistantMsg = msg as AssistantMessage;
-      if (assistantMsg.stopReason !== "error" || !assistantMsg.errorMessage) return;
-      if (swapInProgress) return; // prevent recursive swap
-
-      // Check if this is a retriable error
-      if (!isRetriableError(assistantMsg.errorMessage)) {
-        console.error(`[pi-failover] Non-retriable error: ${assistantMsg.errorMessage}`);
-        return;
+      if (assistantMsg.stopReason === "error" && assistantMsg.errorMessage) {
+        if (isRetriableError(assistantMsg.errorMessage)) {
+          consecutiveErrors++;
+          lastErrorMessage = assistantMsg.errorMessage;
+          lastErrorIsPiRetryable = PI_RETRYABLE.test(assistantMsg.errorMessage);
+          console.error(
+            `[pi-failover] Retriable error #${consecutiveErrors} (pi-retryable=${lastErrorIsPiRetryable}): ${assistantMsg.errorMessage}`
+          );
+        }
+      } else {
+        // Successful response — reset
+        if (consecutiveErrors > 0) {
+          console.error(`[pi-failover] Success after ${consecutiveErrors} error(s), resetting`);
+        }
+        consecutiveErrors = 0;
+        lastErrorMessage = "";
       }
+    });
 
-      // Find next fallback
+    pi.on("agent_end", async (event, ctx) => {
+      if (swapInProgress) return;
+      if (consecutiveErrors === 0) return;
+
+      // Decide whether to swap now or wait for Pi's retries
+      const shouldSwapNow =
+        // Errors Pi won't retry → swap immediately
+        (!lastErrorIsPiRetryable) ||
+        // Errors Pi retries → wait until retries exhausted
+        (consecutiveErrors > PI_MAX_RETRIES);
+
+      if (!shouldSwapNow) return; // Pi is still retrying, wait
+
+      // Time to swap
       const nextIndex = fallbackIndex + 1;
       if (nextIndex >= config.fallback_models.length) {
-        notify("❌ All fallback models exhausted", "error");
+        notify("\u274c All fallback models exhausted", "error");
+        consecutiveErrors = 0;
         return;
       }
 
       const fallback = config.fallback_models[nextIndex];
-      const currentModel = `${assistantMsg.provider}/${assistantMsg.model}`;
 
       console.error(
-        `[pi-failover] Retriable error on ${currentModel}: ${assistantMsg.errorMessage}`
+        `[pi-failover] Swapping to ${fallback.provider}/${fallback.model} after ${consecutiveErrors} failure(s)`
       );
       notify(
-        `⚠️ ${currentModel} failed — swapping to ${fallback.provider}/${fallback.model}`,
+        `\u26a0\ufe0f Swapping to ${fallback.provider}/${fallback.model}`,
         "warning"
       );
-      desktopNotify(`→ ${fallback.provider}/${fallback.model}`, assistantMsg.errorMessage);
+      desktopNotify(`\u2192 ${fallback.provider}/${fallback.model}`, lastErrorMessage);
 
-      // Attempt the swap
       swapInProgress = true;
       fallbackIndex = nextIndex;
       swapCount++;
+      consecutiveErrors = 0;
 
       try {
         const model = ctx.modelRegistry.find(fallback.provider, fallback.model);
         if (!model) {
-          notify(`❌ Fallback model not found: ${fallback.provider}/${fallback.model}`, "error");
-          swapInProgress = false;
+          notify(`\u274c Fallback not found: ${fallback.provider}/${fallback.model}`, "error");
           return;
         }
 
         const success = await pi.setModel(model);
         if (!success) {
-          notify(`❌ No API key for ${fallback.provider}/${fallback.model}`, "error");
-          swapInProgress = false;
+          notify(`\u274c No API key for ${fallback.provider}/${fallback.model}`, "error");
           return;
         }
 
-        ctx.ui.setStatus(
-          "failover",
-          `⚡ swapped → ${fallback.provider}/${fallback.model}`
-        );
+        ctx.ui.setStatus("failover", `\u26a1 swapped \u2192 ${fallback.provider}/${fallback.model}`);
 
-        // Retry the last prompt on the new model
         if (lastUserPrompt) {
           console.error(`[pi-failover] Retrying prompt on ${fallback.provider}/${fallback.model}`);
           pi.sendUserMessage(lastUserPrompt, { deliverAs: "followUp" });
