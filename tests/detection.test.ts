@@ -75,6 +75,14 @@ describe("classifyError", () => {
     expect(classifyError({ status: 429, message: "" }, customRules).shouldFailover).toBe(true);
   });
 
+  test("APIConnectionError triggers failover", () => {
+    class APIConnectionError extends Error {
+      constructor(msg: string) { super(msg); }
+    }
+    const err = new APIConnectionError("Connection error.");
+    expect(classifyError(err, rules).shouldFailover).toBe(true);
+  });
+
   test("generic fetch error triggers failover", () => {
     const err = new Error("fetch failed");
     expect(classifyError(err, rules).shouldFailover).toBe(true);

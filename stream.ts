@@ -224,10 +224,13 @@ async function attemptBackend(
   const apiKey = backend.config.api_key || options?.apiKey || "";
   const baseURL = backend.config.base_url || model.baseUrl || "https://api.anthropic.com";
 
+  console.error(`[pi-failover] Attempting "${backend.config.name}" → ${baseURL}`);
+
   const betaFeatures = ["fine-grained-tool-streaming-2025-05-14", "interleaved-thinking-2025-05-14"];
   const client = new Anthropic({
     apiKey,
     baseURL,
+    maxRetries: 0, // We handle retries via failover — don't let the SDK retry internally
     dangerouslyAllowBrowser: true,
     defaultHeaders: {
       accept: "application/json",
@@ -398,8 +401,10 @@ export function streamWithFailover(
 
           // Success
           if (i > 0) {
-            // We failed over — the first backend(s) were degraded
+            console.error(`[pi-failover] ✅ Failover succeeded on backend "${backend.config.name}" (attempt ${i + 1})`);
             totalFailovers++;
+          } else {
+            console.error(`[pi-failover] ✅ Primary backend "${backend.config.name}" succeeded`);
           }
 
           stream.push({
@@ -415,6 +420,8 @@ export function streamWithFailover(
 
           const classification = classifyError(err, failoverConfig.failover);
           lastError = err instanceof Error ? err : new Error(String(err));
+
+          console.error(`[pi-failover] ❌ "${backend.config.name}" → ${classification.reason}`);
 
           if (!classification.shouldFailover) {
             // Non-retriable error — bubble up immediately

@@ -43,10 +43,11 @@ const DEFAULT_CONFIG: FailoverConfig = {
 
 export function loadConfig(): FailoverConfig {
   const candidates = [
+    process.env.PI_FAILOVER_CONFIG,
     join(process.cwd(), "failover.yaml"),
     join(process.cwd(), "failover.yml"),
     join(process.env.HOME || "~", ".config", "pi-failover", "failover.yaml"),
-  ];
+  ].filter(Boolean) as string[];
 
   for (const p of candidates) {
     if (existsSync(p)) {

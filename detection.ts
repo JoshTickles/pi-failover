@@ -29,6 +29,14 @@ export function classifyError(
   if (error && typeof error === "object") {
     const err = error as any;
 
+    // Anthropic SDK APIConnectionError (no .status, wraps fetch failure)
+    if (err.constructor?.name === "APIConnectionError") {
+      return {
+        shouldFailover: rules.trigger_on_connection_error,
+        reason: `APIConnectionError: ${err.message || "connection failed"}`,
+      };
+    }
+
     // HTTP status from Anthropic SDK APIError
     if (typeof err.status === "number") {
       const shouldFailover = rules.trigger_codes.includes(err.status);
@@ -63,6 +71,7 @@ export function classifyError(
   const message = error instanceof Error ? error.message : String(error);
   const isNetworkError =
     message.includes("fetch failed") ||
+    message.includes("Connection error") ||
     message.includes("ECONNREFUSED") ||
     message.includes("ENOTFOUND") ||
     message.includes("socket hang up") ||
