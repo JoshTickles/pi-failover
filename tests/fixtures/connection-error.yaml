@@ -1,0 +1,25 @@
+# Test: connection refused → failover to working backend
+
+failover:
+  trigger_codes: [429, 402, 500, 504, 529]
+  trigger_on_connection_error: true
+  cooldown_seconds: 60
+  max_retries: 3
+
+notify:
+  enabled: false
+
+fallback_models: []
+
+backends:
+  - name: "dead-endpoint"
+    enabled: true
+    type: "anthropic"
+    api_key: "sk-fake"
+    base_url: "http://127.0.0.1:19999"
+
+  - name: "backup-ok"
+    enabled: true
+    type: "anthropic"
+    api_key: "sk-fake"
+    base_url: "http://127.0.0.1:19002"

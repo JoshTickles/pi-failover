@@ -1,6 +1,10 @@
-// Tiny mock: port 19001 returns 429, port 19002 returns a valid Anthropic streaming response
-const MOCK_SSE = `event: message_start
-data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}
+// tests/mock-server.ts — Mock Anthropic API servers for integration tests
+//
+// Port 19001: Always returns 429 rate_limit_error
+// Port 19002: Returns valid Anthropic SSE streaming response
+
+const SSE_RESPONSE = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_test","type":"message","role":"assistant","content":[],"model":"mock-model","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":1}}}
 
 event: content_block_start
 data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
@@ -19,11 +23,9 @@ data: {"type":"message_stop"}
 
 `;
 
-// 429 server
 Bun.serve({
   port: 19001,
   fetch() {
-    console.error("[mock:19001] Returning 429");
     return new Response(
       JSON.stringify({ error: { type: "rate_limit_error", message: "Rate limit exceeded" } }),
       { status: 429, headers: { "content-type": "application/json" } }
@@ -31,16 +33,16 @@ Bun.serve({
   },
 });
 
-// Success server
 Bun.serve({
   port: 19002,
   fetch() {
-    console.error("[mock:19002] Returning 200 SSE");
-    return new Response(MOCK_SSE, {
+    return new Response(SSE_RESPONSE, {
       status: 200,
       headers: { "content-type": "text/event-stream" },
     });
   },
 });
 
-console.error("[mock] 429 server on :19001, success server on :19002");
+console.error("[mock] 429 on :19001, 200 SSE on :19002");
+// Keep alive
+await new Promise(() => {});

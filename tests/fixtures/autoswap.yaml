@@ -1,0 +1,23 @@
+# Test config for auto-swap integration test
+# failover provider → 429 mock (will fail)
+# fallback_models → mock-backup provider (will succeed)
+
+failover:
+  trigger_codes: [429, 402, 500, 504, 529]
+  trigger_on_connection_error: true
+  cooldown_seconds: 60
+  max_retries: 1
+
+notify:
+  enabled: false
+
+fallback_models:
+  - provider: "mock-backup"
+    model: "mock-model"
+
+backends:
+  - name: "always-429"
+    enabled: true
+    type: "anthropic"
+    api_key: "sk-fake"
+    base_url: "http://127.0.0.1:19001"

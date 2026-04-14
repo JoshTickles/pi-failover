@@ -1,0 +1,26 @@
+# Test: backend failover only (mechanism 1)
+# Backend 1 → 429, Backend 2 → success
+
+failover:
+  trigger_codes: [429, 402, 500, 504, 529]
+  trigger_on_connection_error: true
+  cooldown_seconds: 60
+  max_retries: 3
+
+notify:
+  enabled: false
+
+fallback_models: []
+
+backends:
+  - name: "rate-limited"
+    enabled: true
+    type: "anthropic"
+    api_key: "sk-fake"
+    base_url: "http://127.0.0.1:19001"
+
+  - name: "backup-ok"
+    enabled: true
+    type: "anthropic"
+    api_key: "sk-fake"
+    base_url: "http://127.0.0.1:19002"
