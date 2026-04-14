@@ -2,20 +2,42 @@
 # Place in: ./failover.yaml or ~/.config/pi-failover/failover.yaml
 
 failover:
-  # HTTP status codes that trigger failover to next backend
   trigger_codes: [429, 402, 500, 504, 529]
-  # Also failover on connection errors (DNS, TCP, TLS failures)
   trigger_on_connection_error: true
-  # Seconds to skip a failed backend before retrying it
   cooldown_seconds: 300
-  # Max backends to try per request
   max_retries: 3
 
 notify:
   enabled: true
-  desktop: true  # macOS desktop notification on failover
+  desktop: true
 
-# Backends tried in order — first healthy one wins
+# ──────────────────────────────────────────────────────────────────
+# Automatic model swap chain (Mechanism 2 — fully automatic)
+#
+# When ANY active model errors with a retriable error (429, 529, etc.),
+# pi-failover swaps to the next model in this list and retries the prompt.
+# Works with autoresearch, -p mode, interactive — anything.
+#
+# List models in priority order. Uses whatever providers Pi already has
+# configured (anthropic, amazon-bedrock, google-vertex, etc.).
+# ──────────────────────────────────────────────────────────────────
+fallback_models:
+  - provider: "amazon-bedrock"
+    model: "global.anthropic.claude-sonnet-4-6"
+
+  # - provider: "anthropic"
+  #   model: "claude-sonnet-4-6"
+
+  # - provider: "google-vertex"
+  #   model: "claude-sonnet-4-6"
+
+# ──────────────────────────────────────────────────────────────────
+# Multi-backend failover provider (Mechanism 1 — requires /model selection)
+#
+# Registers a "failover" provider that tries multiple Anthropic API
+# endpoints in sequence. Use /model → failover/claude-sonnet-4-6.
+# Useful when you have multiple API keys or endpoints.
+# ──────────────────────────────────────────────────────────────────
 backends:
   - name: "anthropic-primary"
     enabled: true
@@ -23,15 +45,8 @@ backends:
     api_key_env: "ANTHROPIC_API_KEY"
     base_url: "https://api.anthropic.com"
 
-  - name: "anthropic-backup"
-    enabled: false
-    type: "anthropic"
-    api_key_env: "ANTHROPIC_BACKUP_API_KEY"
-    base_url: "https://api.anthropic.com"
-
-  # Example: different region / account
-  # - name: "anthropic-eu"
+  # - name: "anthropic-backup"
   #   enabled: false
   #   type: "anthropic"
-  #   api_key_env: "ANTHROPIC_EU_API_KEY"
+  #   api_key_env: "ANTHROPIC_BACKUP_API_KEY"
   #   base_url: "https://api.anthropic.com"

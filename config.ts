@@ -1,8 +1,9 @@
-// config.ts — YAML config loading for failover providers
+// config.ts — YAML config loading for failover
 import { parse } from "yaml";
 import { readFileSync, existsSync } from "fs";
 import { join } from "path";
 
+/** A backend for the "failover" provider (custom streamSimple) */
 export interface BackendConfig {
   name: string;
   enabled: boolean;
@@ -10,6 +11,14 @@ export interface BackendConfig {
   base_url?: string;
   api_key_env?: string;
   api_key?: string;
+}
+
+/** A fallback model to swap to when the active model errors */
+export interface FallbackModelConfig {
+  /** e.g. "amazon-bedrock" or "anthropic" or "failover" */
+  provider: string;
+  /** e.g. "global.anthropic.claude-sonnet-4-6" */
+  model: string;
 }
 
 export interface FailoverRules {
@@ -27,7 +36,14 @@ export interface NotifyConfig {
 export interface FailoverConfig {
   failover: FailoverRules;
   notify: NotifyConfig;
+  /** Backends for the "failover" provider (streamSimple-based failover) */
   backends: BackendConfig[];
+  /**
+   * Automatic model swap chain. When any active model errors with a retriable
+   * error, pi-failover swaps to the next model in this list and retries.
+   * Works with ANY provider (anthropic, bedrock, vertex, etc.).
+   */
+  fallback_models: FallbackModelConfig[];
 }
 
 const DEFAULT_CONFIG: FailoverConfig = {
@@ -39,6 +55,7 @@ const DEFAULT_CONFIG: FailoverConfig = {
   },
   notify: { enabled: true, desktop: true },
   backends: [],
+  fallback_models: [],
 };
 
 export function loadConfig(): FailoverConfig {
@@ -55,11 +72,11 @@ export function loadConfig(): FailoverConfig {
       const parsed = parse(raw) as Partial<FailoverConfig>;
       const config = mergeDeep(DEFAULT_CONFIG, parsed) as FailoverConfig;
       resolveKeys(config);
+      console.error(`[pi-failover] Config loaded from ${p}`);
       return config;
     }
   }
 
-  // No config found — return empty (extension will warn)
   return DEFAULT_CONFIG;
 }
 

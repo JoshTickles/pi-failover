@@ -1,17 +1,19 @@
 // index.ts — Pi extension entry point
 //
-// Registers a "failover" provider that wraps the Anthropic API with
-// automatic failover across multiple backends (different API keys,
-// endpoints, etc.) on retriable errors (429, 402, 529, etc.).
+// Two failover mechanisms:
 //
-// Usage:
-//   1. Create ~/.config/pi-failover/failover.yaml (or ./failover.yaml)
-//   2. Install: pi --extension ./path/to/pi-failover
-//      Or symlink to ~/.pi/agent/extensions/pi-failover/
-//   3. Use /model to select "failover/<model>"
+// 1. "failover" provider (streamSimple) — tries multiple Anthropic backends
+//    in sequence within a single model call. Transparent to Pi.
+//    Requires: /model → failover/claude-sonnet-4-6
+//
+// 2. Automatic model swap — watches for errors on ANY active model.
+//    On retriable error, swaps to the next model in fallback_models chain
+//    and retries automatically. Zero manual intervention.
+//    Requires: fallback_models configured in failover.yaml
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { loadConfig } from "./config";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { AssistantMessage } from "@mariozechner/pi-ai";
+import { loadConfig, type FallbackModelConfig } from "./config";
 import {
   initBackends,
   setFailoverCallback,
@@ -21,121 +23,255 @@ import {
 } from "./stream";
 import { Type } from "@sinclair/typebox";
 
+// ---------------------------------------------------------------------------
+// Error message patterns that indicate retriable provider failures
+// ---------------------------------------------------------------------------
+const RETRIABLE_PATTERNS = [
+  /rate.?limit/i,
+  /429/,
+  /too many requests/i,
+  /overloaded/i,
+  /529/,
+  /billing/i,
+  /402/,
+  /capacity/i,
+  /quota/i,
+  /usage.?limit/i,
+  /server.?error/i,
+  /500/,
+  /timeout/i,
+  /504/,
+  /connection.?error/i,
+  /ECONNREFUSED/i,
+];
+
+function isRetriableError(errorMessage: string): boolean {
+  return RETRIABLE_PATTERNS.some((p) => p.test(errorMessage));
+}
+
 export default function (pi: ExtensionAPI) {
   const config = loadConfig();
   const enabledBackends = config.backends.filter((b) => b.enabled);
+  const hasFallbackModels = config.fallback_models.length > 0;
+  const hasBackends = enabledBackends.length > 0;
 
-  if (enabledBackends.length === 0) {
-    // No config or no backends — register a noop
-    console.error("[pi-failover] No enabled backends found in failover.yaml. Extension inactive.");
+  if (!hasBackends && !hasFallbackModels) {
+    console.error("[pi-failover] No backends or fallback_models configured. Extension inactive.");
     return;
   }
 
-  // Initialize backend state
-  initBackends(config);
+  // =========================================================================
+  // Mechanism 1: "failover" provider with streamSimple (multi-backend)
+  // =========================================================================
+  if (hasBackends) {
+    initBackends(config);
 
-  // Track active notification context
-  let notifyUi: { notify: (msg: string, level: "info" | "warning" | "error") => void } | undefined;
+    pi.registerProvider("failover", {
+      baseUrl: enabledBackends[0].base_url || "https://api.anthropic.com",
+      apiKey: enabledBackends[0].api_key_env || enabledBackends[0].api_key || "ANTHROPIC_API_KEY",
+      api: "failover-api" as any,
+      models: [
+        {
+          id: "claude-sonnet-4-20250514",
+          name: "Claude Sonnet 4 (failover)",
+          reasoning: true, input: ["text", "image"],
+          cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+          contextWindow: 200000, maxTokens: 64000,
+        },
+        {
+          id: "claude-sonnet-4-6",
+          name: "Claude Sonnet 4.6 (failover)",
+          reasoning: true, input: ["text", "image"],
+          cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
+          contextWindow: 200000, maxTokens: 64000,
+        },
+        {
+          id: "claude-opus-4-6",
+          name: "Claude Opus 4.6 (failover)",
+          reasoning: true, input: ["text", "image"],
+          cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+          contextWindow: 200000, maxTokens: 64000,
+        },
+        {
+          id: "claude-opus-4-5",
+          name: "Claude Opus 4.5 (failover)",
+          reasoning: true, input: ["text", "image"],
+          cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
+          contextWindow: 200000, maxTokens: 64000,
+        },
+      ],
+      streamSimple: streamWithFailover,
+    });
+  }
 
-  // Failover notification callback
-  setFailoverCallback((from, to, reason) => {
-    const msg = `⚠️ Failover: ${from} → ${to} (${reason})`;
+  // =========================================================================
+  // Mechanism 2: Automatic model swap on error (works with ANY provider)
+  // =========================================================================
+  let currentCtx: ExtensionContext | undefined;
+  let lastUserPrompt: string | undefined;
+  let swapInProgress = false;
+  let swapCount = 0;
+  // Track which fallback index we're on. -1 = using the user's original model.
+  let fallbackIndex = -1;
+  // Track the model the user originally selected (so we can restore later)
+  let originalModel: { provider: string; id: string } | undefined;
+
+  // Notification helper
+  function notify(msg: string, level: "info" | "warning" | "error" = "info") {
     console.error(`[pi-failover] ${msg}`);
+    currentCtx?.ui.notify(msg, level);
+  }
 
-    if (notifyUi) {
-      notifyUi.notify(msg, "warning");
-    }
+  // Desktop notification
+  function desktopNotify(subtitle: string, body: string) {
+    if (!config.notify.enabled || !config.notify.desktop) return;
+    try {
+      Bun.spawn([
+        "osascript", "-e",
+        `display notification "${body}" with title "pi-failover" subtitle "${subtitle}"`,
+      ]);
+    } catch {}
+  }
 
-    // macOS desktop notification
-    if (config.notify.enabled && config.notify.desktop) {
-      try {
-        const proc = Bun.spawn([
-          "osascript", "-e",
-          `display notification "${reason}" with title "pi-failover" subtitle "→ ${to}"`,
-        ]);
-        // fire and forget
-      } catch {}
-    }
+  // Failover callback for mechanism 1
+  setFailoverCallback((from, to, reason) => {
+    const msg = `⚠️ Backend failover: ${from} → ${to}`;
+    notify(msg, "warning");
+    desktopNotify(`→ ${to}`, reason);
   });
 
-  // Store UI context from events
+  // Capture UI context
   pi.on("session_start", async (_event, ctx) => {
-    notifyUi = ctx.ui;
-    ctx.ui.setStatus("failover", `⚡ ${enabledBackends.length} backends`);
+    currentCtx = ctx;
+    const parts: string[] = [];
+    if (hasBackends) parts.push(`${enabledBackends.length} backend(s)`);
+    if (hasFallbackModels) parts.push(`${config.fallback_models.length} fallback model(s)`);
+    ctx.ui.setStatus("failover", `⚡ ${parts.join(", ")}`);
   });
 
-  // Register the failover provider
-  // Models match the standard Anthropic lineup so /model selection works
-  pi.registerProvider("failover", {
-    baseUrl: enabledBackends[0].base_url || "https://api.anthropic.com",
-    apiKey: enabledBackends[0].api_key_env || enabledBackends[0].api_key || "ANTHROPIC_API_KEY",
-    api: "failover-api" as any,
+  if (hasFallbackModels) {
+    // Track user's original model selection
+    pi.on("model_select", async (event, _ctx) => {
+      // Only capture if user explicitly changed model (not our swap)
+      if (!swapInProgress) {
+        originalModel = { provider: event.model.provider, id: event.model.id };
+        fallbackIndex = -1; // reset chain
+        console.error(`[pi-failover] Tracking original model: ${originalModel.provider}/${originalModel.id}`);
+      }
+    });
 
-    models: [
-      {
-        id: "claude-sonnet-4-20250514",
-        name: "Claude Sonnet 4 (failover)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-        contextWindow: 200000,
-        maxTokens: 64000,
-      },
-      {
-        id: "claude-sonnet-4-6",
-        name: "Claude Sonnet 4.6 (failover)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
-        contextWindow: 200000,
-        maxTokens: 64000,
-      },
-      {
-        id: "claude-opus-4-6",
-        name: "Claude Opus 4.6 (failover)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-        contextWindow: 200000,
-        maxTokens: 64000,
-      },
-      {
-        id: "claude-opus-4-5",
-        name: "Claude Opus 4.5 (failover)",
-        reasoning: true,
-        input: ["text", "image"],
-        cost: { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 },
-        contextWindow: 200000,
-        maxTokens: 64000,
-      },
-    ],
+    // Capture user prompts so we can replay on swap
+    pi.on("input", async (event, _ctx) => {
+      if (event.source === "extension") return { action: "continue" as const };
+      lastUserPrompt = event.text;
+      return { action: "continue" as const };
+    });
 
-    streamSimple: streamWithFailover,
-  });
+    // Watch for errors on assistant messages
+    pi.on("message_end", async (event, ctx) => {
+      const msg = event.message;
+      if (msg.role !== "assistant") return;
 
-  // -------------------------------------------------------------------------
-  // /failover command — show status
-  // -------------------------------------------------------------------------
+      const assistantMsg = msg as AssistantMessage;
+      if (assistantMsg.stopReason !== "error" || !assistantMsg.errorMessage) return;
+      if (swapInProgress) return; // prevent recursive swap
+
+      // Check if this is a retriable error
+      if (!isRetriableError(assistantMsg.errorMessage)) {
+        console.error(`[pi-failover] Non-retriable error: ${assistantMsg.errorMessage}`);
+        return;
+      }
+
+      // Find next fallback
+      const nextIndex = fallbackIndex + 1;
+      if (nextIndex >= config.fallback_models.length) {
+        notify("❌ All fallback models exhausted", "error");
+        return;
+      }
+
+      const fallback = config.fallback_models[nextIndex];
+      const currentModel = `${assistantMsg.provider}/${assistantMsg.model}`;
+
+      console.error(
+        `[pi-failover] Retriable error on ${currentModel}: ${assistantMsg.errorMessage}`
+      );
+      notify(
+        `⚠️ ${currentModel} failed — swapping to ${fallback.provider}/${fallback.model}`,
+        "warning"
+      );
+      desktopNotify(`→ ${fallback.provider}/${fallback.model}`, assistantMsg.errorMessage);
+
+      // Attempt the swap
+      swapInProgress = true;
+      fallbackIndex = nextIndex;
+      swapCount++;
+
+      try {
+        const model = ctx.modelRegistry.find(fallback.provider, fallback.model);
+        if (!model) {
+          notify(`❌ Fallback model not found: ${fallback.provider}/${fallback.model}`, "error");
+          swapInProgress = false;
+          return;
+        }
+
+        const success = await pi.setModel(model);
+        if (!success) {
+          notify(`❌ No API key for ${fallback.provider}/${fallback.model}`, "error");
+          swapInProgress = false;
+          return;
+        }
+
+        ctx.ui.setStatus(
+          "failover",
+          `⚡ swapped → ${fallback.provider}/${fallback.model}`
+        );
+
+        // Retry the last prompt on the new model
+        if (lastUserPrompt) {
+          console.error(`[pi-failover] Retrying prompt on ${fallback.provider}/${fallback.model}`);
+          pi.sendUserMessage(lastUserPrompt, { deliverAs: "followUp" });
+        }
+      } finally {
+        swapInProgress = false;
+      }
+    });
+  }
+
+  // =========================================================================
+  // /failover command
+  // =========================================================================
   pi.registerCommand("failover", {
-    description: "Show failover provider status",
+    description: "Show failover status",
     handler: async (_args, ctx) => {
-      const states = getBackendStates();
-      const now = Date.now();
-      const lines: string[] = [
-        `Failover backends (${states.length}):`,
-        "",
-      ];
+      const lines: string[] = [];
 
-      for (const s of states) {
-        const healthy = s.degradedUntil <= now;
-        const status = healthy ? "✅ healthy" : `❌ cooldown (${Math.ceil((s.degradedUntil - now) / 1000)}s)`;
-        const errors = s.errorCount > 0 ? ` [${s.errorCount} errors]` : "";
-        const lastErr = s.lastError ? `\n    Last: ${s.lastError}` : "";
-        lines.push(`  ${s.config.name}: ${status}${errors}${lastErr}`);
+      if (hasBackends) {
+        const states = getBackendStates();
+        const now = Date.now();
+        lines.push("Backends (streamSimple failover):");
+        for (const s of states) {
+          const healthy = s.degradedUntil <= now;
+          const status = healthy ? "✅" : `❌ cooldown (${Math.ceil((s.degradedUntil - now) / 1000)}s)`;
+          lines.push(`  ${s.config.name}: ${status} [${s.errorCount} errors]`);
+        }
+        lines.push(`  Backend failovers: ${getTotalFailovers()}`);
+        lines.push("");
+      }
+
+      if (hasFallbackModels) {
+        lines.push("Fallback models (auto-swap):");
+        for (let i = 0; i < config.fallback_models.length; i++) {
+          const f = config.fallback_models[i];
+          const marker = i === fallbackIndex ? " ← active" : i < fallbackIndex ? " ✓ tried" : "";
+          lines.push(`  ${i + 1}. ${f.provider}/${f.model}${marker}`);
+        }
+        if (originalModel) {
+          lines.push(`  Original: ${originalModel.provider}/${originalModel.id}`);
+        }
+        lines.push(`  Model swaps: ${swapCount}`);
       }
 
       lines.push("");
-      lines.push(`Total failovers this session: ${getTotalFailovers()}`);
       lines.push(`Trigger codes: ${config.failover.trigger_codes.join(", ")}`);
       lines.push(`Cooldown: ${config.failover.cooldown_seconds}s`);
 
@@ -143,43 +279,46 @@ export default function (pi: ExtensionAPI) {
     },
   });
 
-  // -------------------------------------------------------------------------
-  // failover_status tool — lets the LLM check provider health
-  // -------------------------------------------------------------------------
+  // =========================================================================
+  // failover_status tool
+  // =========================================================================
   pi.registerTool({
     name: "failover_status",
     label: "Failover Status",
-    description: "Check the health status of all configured failover backends",
+    description: "Check the health status of failover backends and fallback models",
     parameters: Type.Object({}),
     async execute() {
-      const states = getBackendStates();
-      const now = Date.now();
-      const status = states.map((s) => ({
-        name: s.config.name,
-        healthy: s.degradedUntil <= now,
-        errorCount: s.errorCount,
-        lastError: s.lastError,
-        cooldownRemaining:
-          s.degradedUntil > now ? Math.ceil((s.degradedUntil - now) / 1000) : 0,
-      }));
+      const backendStatus = hasBackends
+        ? getBackendStates().map((s) => ({
+            name: s.config.name,
+            healthy: s.degradedUntil <= Date.now(),
+            errorCount: s.errorCount,
+            lastError: s.lastError,
+          }))
+        : [];
 
       return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(
-              { backends: status, totalFailovers: getTotalFailovers() },
-              null,
-              2
-            ),
-          },
-        ],
+        content: [{
+          type: "text" as const,
+          text: JSON.stringify({
+            backends: backendStatus,
+            backendFailovers: getTotalFailovers(),
+            fallbackModels: config.fallback_models,
+            currentFallbackIndex: fallbackIndex,
+            modelSwaps: swapCount,
+            originalModel,
+          }, null, 2),
+        }],
         details: {},
       };
     },
   });
 
-  console.error(
-    `[pi-failover] Loaded with ${enabledBackends.length} backend(s): ${enabledBackends.map((b) => b.name).join(", ")}`
-  );
+  // =========================================================================
+  // Log summary
+  // =========================================================================
+  const parts: string[] = [];
+  if (hasBackends) parts.push(`${enabledBackends.length} backend(s)`);
+  if (hasFallbackModels) parts.push(`${config.fallback_models.length} fallback model(s)`);
+  console.error(`[pi-failover] Loaded: ${parts.join(", ")}`);
 }
