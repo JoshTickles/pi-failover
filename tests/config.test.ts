@@ -1,6 +1,45 @@
 // tests/config.test.ts
-import { describe, test, expect } from "bun:test";
-import { loadConfig } from "../config";
+import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { writeFileSync, unlinkSync } from "fs";
+import { join } from "path";
+
+const TEST_CONFIG = join(import.meta.dir, "..", "failover.yaml");
+
+beforeAll(() => {
+  // Create a temporary config in the project root for tests
+  writeFileSync(
+    TEST_CONFIG,
+    `
+failover:
+  trigger_codes: [429, 402, 500, 504, 529]
+  trigger_on_connection_error: true
+  cooldown_seconds: 300
+  max_retries: 3
+
+notify:
+  enabled: true
+  desktop: true
+
+fallback_models:
+  - provider: "amazon-bedrock"
+    model: "global.anthropic.claude-sonnet-4-6"
+
+backends:
+  - name: "anthropic-primary"
+    enabled: true
+    type: "anthropic"
+    api_key_env: "ANTHROPIC_API_KEY"
+    base_url: "https://api.anthropic.com"
+`
+  );
+});
+
+afterAll(() => {
+  try { unlinkSync(TEST_CONFIG); } catch {}
+});
+
+// Import after writing the file
+const { loadConfig } = await import("../config");
 
 describe("loadConfig", () => {
   test("loads config from cwd failover.yaml", () => {

@@ -1,35 +1,21 @@
 # pi-failover
 
-Automatic LLM model failover extension for [Pi coding agent](https://github.com/mariozechner/pi-coding-agent).
-
-When your primary API key hits a rate limit, billing cap, or service outage — pi-failover transparently retries with the next backend. No dropped sessions.
-
-## How it works
-
-1. You configure ordered **backends** in `failover.yaml` (different API keys, endpoints, etc.)
-2. The extension registers a `failover` provider with `streamSimple` that wraps the Anthropic API
-3. On retriable errors (429, 402, 500, 504, 529), it automatically tries the next backend
-4. Failed backends enter a cooldown period, then recover
-5. You get a desktop notification + status bar update on failover
+Automatic LLM model failover for [Pi coding agent](https://github.com/mariozechner/pi-coding-agent). When your model hits a rate limit, usage cap, or outage, pi-failover swaps to a backup model and retries — no manual intervention.
 
 ## Install
 
 ```bash
-# Option 1: symlink for global use
-ln -s /path/to/pi-failover ~/.pi/agent/extensions/pi-failover
+# Clone
+git clone https://github.com/joshtickles/pi-failover.git ~/home/pi-failover
+cd ~/home/pi-failover && npm install
 
-# Option 2: one-off test
-pi -e /path/to/pi-failover
-```
-
-Install dependencies:
-```bash
-cd /path/to/pi-failover && npm install
+# Symlink into Pi's extensions
+ln -s ~/home/pi-failover ~/.pi/agent/extensions/pi-failover
 ```
 
 ## Configure
 
-Create `~/.config/pi-failover/failover.yaml` (or `./failover.yaml` in your project):
+Create `~/.config/pi-failover/failover.yaml`:
 
 ```yaml
 failover:
@@ -40,56 +26,110 @@ failover:
 
 notify:
   enabled: true
-  desktop: true
+  desktop: true    # macOS notification on swap
 
+# Models tried in order when the active model errors.
+# Use the provider/model names from /model in Pi.
+fallback_models:
+  - provider: "amazon-bedrock"
+    model: "global.anthropic.claude-opus-4-6-v1"
+  - provider: "amazon-bedrock"
+    model: "global.anthropic.claude-sonnet-4-6"
+```
+
+That's it. Start Pi normally — the extension auto-loads and watches for errors.
+
+## What it does
+
+When you're running on `anthropic/claude-opus-4-6` and hit "You've hit your limit · resets 3pm":
+
+1. Pi's built-in retry fires (3x exponential backoff) for errors it recognises
+2. If Pi's retries exhaust, **or** the error is one Pi won't retry (like subscription caps), pi-failover kicks in
+3. Swaps to `amazon-bedrock/global.anthropic.claude-opus-4-6-v1` via `pi.setModel()`
+4. Retries the prompt automatically via `pi.sendUserMessage()`
+5. If bedrock also fails, walks to the next model in the chain
+6. Desktop notification + status bar update so you know what happened
+
+Works with autoresearch, `-p` mode, interactive — anything.
+
+## Error detection
+
+Errors are detected via `AssistantMessage.stopReason === "error"` on Pi's `message_end` event — structured Pi data, not screen scraping.
+
+| Error | Pi retries? | pi-failover action |
+|---|---|---|
+| `429 rate_limit_error` | ✅ 3x backoff | Swaps after Pi gives up |
+| `You've hit your limit · resets 3pm` | ❌ | **Swaps immediately** |
+| `Claude rate limited (five_hour)` | ✅ 3x backoff | Swaps after Pi gives up |
+| `529 overloaded_error` | ✅ 3x backoff | Swaps after Pi gives up |
+| `Connection error` | ✅ 3x backoff | Swaps after Pi gives up |
+| `401 authentication_error` | ❌ | ❌ No swap (config issue) |
+| `400 invalid_request_error` | ❌ | ❌ No swap |
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `/failover` | Show backend health + fallback chain status |
+
+The `failover_status` tool is also available for the LLM to check health programmatically.
+
+## Config reference
+
+### `fallback_models` (recommended)
+
+Ordered list of models to swap to when the active model errors. Uses providers Pi already has configured.
+
+```yaml
+fallback_models:
+  - provider: "amazon-bedrock"        # AWS Bedrock
+    model: "global.anthropic.claude-opus-4-6-v1"
+  - provider: "anthropic"             # Direct Anthropic API
+    model: "claude-sonnet-4-6"
+  - provider: "google-vertex"         # GCP Vertex AI
+    model: "claude-sonnet-4-6"
+```
+
+### `backends` (optional, advanced)
+
+Registers a `failover/*` provider that tries multiple Anthropic API keys in sequence within a single request. Only needed if you have multiple API keys for the same provider.
+
+```yaml
 backends:
   - name: "anthropic-primary"
     enabled: true
     type: "anthropic"
     api_key_env: "ANTHROPIC_API_KEY"
     base_url: "https://api.anthropic.com"
-
   - name: "anthropic-backup"
     enabled: true
     type: "anthropic"
     api_key_env: "ANTHROPIC_BACKUP_API_KEY"
-    base_url: "https://api.anthropic.com"
 ```
 
-## Use
+Then select `failover/claude-sonnet-4-6` via `/model`.
 
-1. Start Pi normally
-2. Use `/model` and select a `failover/*` model (e.g. `failover/claude-sonnet-4-6`)
-3. Use `/failover` to check backend health anytime
+### `failover`
 
-## Error classification
-
-| HTTP | Error | Failover? |
-|------|-------|-----------|
-| 429 | Rate limit / usage cap | ✅ Yes |
-| 402 | Billing exhausted | ✅ Yes |
-| 500 | Internal server error | ✅ Yes |
-| 504 | Timeout | ✅ Yes |
-| 529 | Overloaded | ✅ Yes |
-| 401 | Auth error | ❌ No (config issue) |
-| 400 | Bad request | ❌ No |
-| 403 | Permission denied | ❌ No |
-| Connection errors | ECONNREFUSED, DNS, etc. | ✅ Configurable |
-
-## Architecture
-
-```
-Pi Agent
-  │
-  ├─► /model → failover/claude-sonnet-4-6
-  │
-  └─► streamSimple (failover-aware)
-        │
-        ├─► Backend 1: api.anthropic.com (key A) ──► 429 rate limited
-        │     ↓ failover
-        ├─► Backend 2: api.anthropic.com (key B) ──► 200 OK ✅
-        │
-        └─► (Backend 1 enters 5min cooldown, auto-recovers)
+```yaml
+failover:
+  trigger_codes: [429, 402, 500, 504, 529]  # HTTP codes that trigger failover
+  trigger_on_connection_error: true           # Also on ECONNREFUSED, DNS, etc.
+  cooldown_seconds: 300                       # Skip failed backend for 5 min
+  max_retries: 3                              # Max backends to try per request
 ```
 
-The extension uses Pi's native `registerProvider` + `streamSimple` API — no proxy process, no external dependencies beyond the Anthropic SDK.
+### `notify`
+
+```yaml
+notify:
+  enabled: true
+  desktop: true     # macOS desktop notification via osascript
+```
+
+## Config locations
+
+Searched in order:
+1. `$PI_FAILOVER_CONFIG` (env var override)
+2. `./failover.yaml` (project-local)
+3. `~/.config/pi-failover/failover.yaml` (global)

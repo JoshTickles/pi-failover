@@ -1,0 +1,24 @@
+# Example failover.yaml — copy to ~/.config/pi-failover/failover.yaml
+# See README.md for full documentation.
+
+failover:
+  trigger_codes: [429, 402, 500, 504, 529]
+  trigger_on_connection_error: true
+  cooldown_seconds: 300
+  max_retries: 3
+
+notify:
+  enabled: true
+  desktop: true
+
+# Fallback chain — models tried in order when the active model errors.
+# Use provider/model names from /model in Pi.
+fallback_models:
+  - provider: "amazon-bedrock"
+    model: "global.anthropic.claude-sonnet-4-6"
+
+  # - provider: "anthropic"
+  #   model: "claude-sonnet-4-6"
+
+# Multi-backend provider (optional, most users don't need this)
+backends: []

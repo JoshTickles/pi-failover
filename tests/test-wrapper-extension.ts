@@ -1,15 +1,12 @@
 // tests/test-wrapper-extension.ts
 //
-// Wraps the real pi-failover extension AND registers a "mock-backup" provider
-// pointing at our success mock server on port 19002.
-// This lets fallback_models swap to mock-backup/mock-model automatically.
+// Registers a "mock-backup" provider for integration testing.
+// The main pi-failover extension is auto-loaded from ~/.pi/agent/extensions/
+// so we DON'T import it here — just register the mock provider.
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import mainExtension from "../index";
 
 export default function (pi: ExtensionAPI) {
-  // Register the mock-backup provider FIRST so it's available when the
-  // main extension tries to look it up for fallback
   pi.registerProvider("mock-backup", {
     baseUrl: "http://127.0.0.1:19002",
     apiKey: "fake-key",
@@ -26,7 +23,4 @@ export default function (pi: ExtensionAPI) {
       },
     ],
   });
-
-  // Run the real extension
-  mainExtension(pi);
 }

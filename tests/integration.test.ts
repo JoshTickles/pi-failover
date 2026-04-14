@@ -23,20 +23,29 @@ beforeAll(async () => {
   // Start mock servers (429 on 19001, 200 SSE on 19002)
   mockProc = Bun.spawn(["bun", "run", MOCK_SERVER], {
     cwd: PROJECT_ROOT,
-    stdout: "pipe",
-    stderr: "pipe",
+    stdout: "inherit",
+    stderr: "inherit",
   });
 
-  // Wait for servers to be ready
-  await new Promise((r) => setTimeout(r, 1000));
+  // Wait for servers to be ready (retry up to 5s)
+  for (let i = 0; i < 50; i++) {
+    try {
+      const resp = await fetch("http://127.0.0.1:19001/v1/messages", {
+        method: "POST",
+        body: "{}",
+      });
+      if (resp.status === 429) break;
+    } catch {}
+    await new Promise((r) => setTimeout(r, 100));
+  }
 
-  // Verify mock is listening
+  // Final check
   try {
-    const resp = await fetch("http://127.0.0.1:19001/v1/messages", { method: "POST" });
-    if (resp.status !== 429) throw new Error(`Expected 429, got ${resp.status}`);
+    const resp = await fetch("http://127.0.0.1:19001/v1/messages", { method: "POST", body: "{}" });
+    if (resp.status !== 429) throw new Error(`Mock not ready: got ${resp.status}`);
   } catch (e: any) {
-    if (e.message?.includes("Expected 429")) throw e;
-    throw new Error(`Mock server not ready: ${e.message}`);
+    if (e.message?.includes("Mock not ready")) throw e;
+    throw new Error(`Mock server failed to start: ${e.message}`);
   }
 });
 
@@ -61,7 +70,7 @@ async function runPi(opts: {
     config,
     model,
     prompt = "respond with only the word 'pong'",
-    extension = PROJECT_ROOT,
+    extension,
     timeoutMs = 30_000,
   } = opts;
 
@@ -70,10 +79,17 @@ async function runPi(opts: {
     PI_FAILOVER_CONFIG: config,
   };
 
-  const proc = Bun.spawn(
-    ["pi", "-e", extension, "-p", prompt, "--no-tools", "--model", model],
-    { cwd: PROJECT_ROOT, env, stdout: "pipe", stderr: "pipe" }
-  );
+  // Build args — only add -e if a custom extension is specified
+  const args = ["pi"];
+  if (extension) args.push("-e", extension);
+  args.push("-p", prompt, "--no-tools", "--model", model);
+
+  const proc = Bun.spawn(args, {
+    cwd: PROJECT_ROOT,
+    env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
 
   // Timeout guard
   const timeout = setTimeout(() => proc.kill(), timeoutMs);
