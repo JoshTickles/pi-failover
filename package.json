@@ -1,25 +1,17 @@
 {
   "name": "pi-failover",
   "version": "0.1.0",
-  "description": "Automatic LLM model failover proxy for Claude Code",
-  "module": "src/index.ts",
+  "description": "Automatic LLM failover extension for Pi coding agent",
   "type": "module",
   "private": true,
-  "bin": {
-    "pi-failover": "src/index.ts"
+  "pi": {
+    "extensions": ["./index.ts"]
   },
   "scripts": {
-    "start": "bun run src/index.ts start",
-    "dev": "bun run --watch src/index.ts start --debug",
     "test": "bun test"
   },
-  "devDependencies": {
-    "@types/bun": "latest"
-  },
-  "peerDependencies": {
-    "typescript": "^5"
-  },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
     "yaml": "^2.8.3"
   }
 }
