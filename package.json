@@ -1,0 +1,25 @@
+{
+  "name": "pi-failover",
+  "version": "0.1.0",
+  "description": "Automatic LLM model failover proxy for Claude Code",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "pi-failover": "src/index.ts"
+  },
+  "scripts": {
+    "start": "bun run src/index.ts start",
+    "dev": "bun run --watch src/index.ts start --debug",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "yaml": "^2.8.3"
+  }
+}

@@ -1,0 +1,52 @@
+# pi-failover configuration
+# Copy to ./failover.yaml or ~/.config/pi-failover/failover.yaml
+
+listen:
+  host: "127.0.0.1"
+  port: 8099
+
+failover:
+  # HTTP status codes that trigger failover to next provider
+  trigger_codes: [429, 402, 500, 504, 529]
+  # Failover on connection errors (DNS, TCP, TLS failures)
+  trigger_on_connection_error: true
+  # Failover on mid-stream SSE errors
+  trigger_on_stream_error: true
+  # Seconds to skip a failed provider before retrying it
+  cooldown_seconds: 300
+  # Max providers to try per request
+  max_retries: 3
+  # "sequential" = try in order, "round-robin" = rotate start position
+  strategy: "sequential"
+
+notify:
+  enabled: true
+  desktop: true
+  # webhook_url: "https://hooks.slack.com/services/..."
+
+# Providers tried in order — first healthy one wins
+providers:
+  - name: "anthropic-primary"
+    enabled: true
+    type: "anthropic"
+    api_key_env: "ANTHROPIC_API_KEY"
+    base_url: "https://api.anthropic.com"
+
+  - name: "anthropic-backup"
+    enabled: false
+    type: "anthropic"
+    api_key_env: "ANTHROPIC_BACKUP_API_KEY"
+    base_url: "https://api.anthropic.com"
+
+  # Phase 2
+  # - name: "bedrock"
+  #   enabled: false
+  #   type: "bedrock"
+  #   region: "us-west-2"
+
+  # Phase 3
+  # - name: "vertex"
+  #   enabled: false
+  #   type: "vertex"
+  #   project_id: "str-r-and-d"
+  #   region: "us-central1"
