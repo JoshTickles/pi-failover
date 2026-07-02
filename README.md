@@ -5,12 +5,9 @@ Automatic LLM model failover for [Pi coding agent](https://github.com/mariozechn
 ## Install
 
 ```bash
-# Clone
-git clone https://github.com/joshtickles/pi-failover.git ~/home/pi-failover
-cd ~/home/pi-failover && npm install
-
-# Symlink into Pi's extensions
-ln -s ~/home/pi-failover ~/.pi/agent/extensions/pi-failover
+# Clone into Pi's extensions directory
+git clone https://github.com/JoshTickles/pi-failover.git ~/.pi/agent/extensions/pi-failover
+cd ~/.pi/agent/extensions/pi-failover && npm install
 ```
 
 ## Configure
@@ -32,7 +29,9 @@ notify:
 # Use the provider/model names from /model in Pi.
 fallback_models:
   - provider: "amazon-bedrock"
-    model: "global.anthropic.claude-opus-4-6-v1"
+    model: "global.anthropic.claude-opus-4-8"
+  - provider: "amazon-bedrock"
+    model: "us.anthropic.claude-fable-5"
   - provider: "amazon-bedrock"
     model: "global.anthropic.claude-sonnet-4-6"
 ```
@@ -41,11 +40,11 @@ That's it. Start Pi normally — the extension auto-loads and watches for errors
 
 ## What it does
 
-When you're running on `anthropic/claude-opus-4-6` and hit "You've hit your limit · resets 3pm":
+When you're running on `claude-bridge/claude-fable-5` and hit "You've hit your limit · resets 3pm":
 
 1. Pi's built-in retry fires (3x exponential backoff) for errors it recognises
 2. If Pi's retries exhaust, **or** the error is one Pi won't retry (like subscription caps), pi-failover kicks in
-3. Swaps to `amazon-bedrock/global.anthropic.claude-opus-4-6-v1` via `pi.setModel()`
+3. Swaps to `amazon-bedrock/global.anthropic.claude-opus-4-8` via `pi.setModel()`
 4. Retries the prompt automatically via `pi.sendUserMessage()`
 5. If bedrock also fails, walks to the next model in the chain
 6. Desktop notification + status bar update so you know what happened
@@ -82,12 +81,12 @@ Ordered list of models to swap to when the active model errors. Uses providers P
 
 ```yaml
 fallback_models:
-  - provider: "amazon-bedrock"        # AWS Bedrock
-    model: "global.anthropic.claude-opus-4-6-v1"
-  - provider: "anthropic"             # Direct Anthropic API
-    model: "claude-sonnet-4-6"
-  - provider: "google-vertex"         # GCP Vertex AI
-    model: "claude-sonnet-4-6"
+  - provider: "amazon-bedrock"        # AWS Bedrock (cross-region)
+    model: "global.anthropic.claude-opus-4-8"
+  - provider: "amazon-bedrock"        # Fable 5 on Bedrock
+    model: "us.anthropic.claude-fable-5"
+  - provider: "amazon-bedrock"        # Fast, high rate limits
+    model: "global.anthropic.claude-sonnet-4-6"
 ```
 
 ### `backends` (optional, advanced)
