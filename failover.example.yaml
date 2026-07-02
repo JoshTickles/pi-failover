@@ -15,10 +15,13 @@ notify:
 # Use provider/model names from /model in Pi.
 fallback_models:
   - provider: "amazon-bedrock"
-    model: "global.anthropic.claude-sonnet-4-6"
+    model: "global.anthropic.claude-opus-4-8"
 
-  # - provider: "anthropic"
-  #   model: "claude-sonnet-4-6"
+  - provider: "amazon-bedrock"
+    model: "us.anthropic.claude-fable-5"
+
+  - provider: "amazon-bedrock"
+    model: "global.anthropic.claude-sonnet-4-6"
 
 # Multi-backend provider (optional, most users don't need this)
 backends: []
